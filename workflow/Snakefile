@@ -1,0 +1,292 @@
+configfile: "../config/config.yaml"
+
+import os
+import re
+import errno
+from glob import glob
+
+"""
+This is a wrapper pipeline for SCAN2 which sets up and runs the 3 main steps
+(makepanel, scan2, rescue). This requires a large amount of time and 
+proccessors. See the SCAN2 wiki for details.
+https://github.com/parklab/SCAN2/wiki
+"""
+
+# extract parameters from config file
+genome_build = config["genome_build"]
+reference = config[genome_build]["reference"]
+dbsnp = config[genome_build]["dbsnp"]
+refpanel = config[genome_build]["refpanel"]
+regions = config[genome_build]["regions"]
+method = config["method"]
+medium_job_cores = config["medium_job_cores"]
+large_job_cores = config["large_job_cores"]
+fdr = config["fdr"]
+singularity_path = config["singularity"]
+
+# simple method for forcing a symlink to be overwritten instead of throwing an error
+# https://stackoverflow.com/questions/8299386/modifying-a-symlink-in-python
+def symlink_force(target, link_name):
+    try:
+        os.symlink(target, link_name)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            os.remove(link_name)
+            os.symlink(target, link_name)
+        else:
+            raise e
+
+# set up dictionary with bulk and sc names and paths using input table
+with open ('../input/locations.tsv') as locations_file:
+    locations_file.readline()
+    locations_dict = {}
+    for line in locations_file:
+        bulk_bam = line[:-1].split('\t')[-1]
+        sc_bam = line[:-1].split('\t')[1]
+        bulk_name = bulk_bam.split('/')[-1].split('.')[0]
+        sample_id = line[:-1].split('\t')[0].split('-')[0]
+        sc_name = sc_bam.split('/')[-1].split('.')[0]
+        if sample_id not in locations_dict:
+            locations_dict[sample_id] = {}
+            locations_dict[sample_id]['bulk_name'] = bulk_name
+            locations_dict[sample_id]['bulk_bam'] = bulk_bam
+            locations_dict[sample_id]['scs'] = {}
+        locations_dict[sample_id]['scs'][sc_name] = sc_bam
+
+# add symlinks for input folder and create meta files used by SCAN2
+for sample_id in locations_dict.keys():
+    with open(os.path.abspath("../input/" + sample_id + "_panel_meta.csv"),'w') as meta_file:
+        meta_file.write('donor,sample,amp\n')
+        for sc in locations_dict[sample_id]['scs'].keys():
+            meta_file.write(sample_id + ',' + sc + ',' + method + '\n')
+            symlink_force(locations_dict[sample_id]['scs'][sc],'../input/' + sample_id + '.sc' + sc.split('sc')[-1] + '.bam')
+            symlink_force(locations_dict[sample_id]['scs'][sc] + '.bai','../input/' + sample_id + '.sc' + sc.split('sc')[-1] + '.bai')
+        meta_file.write(sample_id + ',' + locations_dict[sample_id]['bulk_name'] + ',bulk\n')
+        symlink_force(locations_dict[sample_id]['bulk_bam'],'../input/' + sample_id + '_bulk.bam')
+        symlink_force(locations_dict[sample_id]['bulk_bam'] + '.bai','../input/' + sample_id + '_bulk.bai')
+
+# assign sc files to their bulk file so snakemake knows what files to group
+samples = glob_wildcards("../input/{sample}.sc{sc}.bam").sample
+samples_dict = {}
+for sample in samples:
+    samples_dict[sample] = glob_wildcards("../input/" + sample + ".sc{sc}.bam").sc
+
+
+"""
+The following set of functions are made for getting files for 
+snakemake rules. This allows us to define parameters using file paths 
+based on wildcards that can't be done within the rule
+"""
+def get_sc(wildcards):
+    out_sc = ['']
+    out_sc = out_sc + expand(os.path.abspath("../input") + "/" + wildcards.sample + ".sc{sc}.bam",sc=samples_dict[wildcards.sample])
+    return " --sc-bam ".join(out_sc)
+
+def get_sc_rda(wildcards):
+    out_sc = ['']
+    out_sc = out_sc + expand(wildcards.sample + "-sc{sc}" + " " + os.path.abspath("../output") + "/" + wildcards.sample + "/call_mutations/" + wildcards.sample + "-sc{sc}" + "/scan2_object.rda",sc=samples_dict[wildcards.sample])
+    return  ' --scan2-object '.join(list(out_sc))
+
+
+# dummy rule to define the final output of the pipeline
+rule all: 
+    input:
+        expand(os.path.abspath("../output/final/{sample}/"),sample=samples),
+
+
+rule makepanel_config: 
+    """
+    create the config file for makepanel
+    """
+    input:
+        bulk=os.path.abspath("../input") + "/{sample}_bulk.bam"
+    output:
+        os.path.abspath("../output/makepanel/{sample}/scan.yaml"),
+    singularity:
+        singularity_path,
+    params: 
+        reference = os.path.abspath(reference),
+        genome = genome_build,
+        dbsnp = os.path.abspath(dbsnp),
+        refpanel = os.path.abspath(refpanel),
+        dir = os.path.abspath("../output/makepanel/"),
+        sc = get_sc,
+        regions = os.path.abspath(regions),
+        meta = os.path.abspath("../input/{sample}_panel_meta.csv"),
+        medium_job_cores = medium_job_cores,
+        large_job_cores = large_job_cores,
+    log:
+        os.path.abspath("../logs/makepanel_config/{sample}.log")
+    shell: 
+        "cd {params.dir} && "
+        "scan2 -d {wildcards.sample} init && "
+        "cd {wildcards.sample} && "
+        "scan2 config --verbose "
+        "--analysis makepanel "
+        "--ref {params.reference} "
+        "--genome {params.genome} "
+        "--regions-file {params.regions} "
+        "--phaser shapeit "
+        "--shapeit-refpanel {params.refpanel} "
+        "--makepanel-metadata {params.meta} "
+        "--dbsnp {params.dbsnp} "
+        "--genotype-n-cores {params.medium_job_cores} "
+        "--integrate-table-n-cores {params.medium_job_cores} "
+        "--digest-depth-n-cores {params.medium_job_cores} "
+        "--permtool-callable-bed-n-cores {params.medium_job_cores} "
+        "--permtool-make-permutations-n-cores {params.medium_job_cores} "
+        "--permtool-combine-permutations-n-cores {params.medium_job_cores} "
+        "--abmodel-n-cores {params.large_job_cores} "
+        "--bulk-bam {input.bulk} "
+        "{params.sc} 2> {log} && "
+        "scan2 validate "
+
+rule makepanel:
+    """
+    run makepanel, warning this is resources intensive
+    """
+    input:
+        os.path.abspath("../output/makepanel/{sample}/scan.yaml"),
+    output:
+        os.path.abspath("../output/makepanel/{sample}/panel/panel.tab.gz"),
+    singularity:
+        singularity_path,
+    log:
+        os.path.abspath("../logs/makepanel/{sample}.log"),
+    params:
+        dir = os.path.abspath("../output/makepanel/{sample}/"),
+    threads: large_job_cores
+    shell:
+        "cd {params.dir} && "
+        "scan2 makepanel --joblimit {threads} > {log}"
+
+rule SCAN2_config: 
+    """
+    create the config file for SCAN2
+    """
+    input:
+        bulk=os.path.abspath("../input") + "/{sample}_bulk.bam",
+        cross_sample_panel=os.path.abspath("../output/makepanel/{sample}/panel/panel.tab.gz"),
+    output:
+        os.path.abspath("../output/{sample}/scan.yaml"),
+    singularity:
+        singularity_path,
+    params: 
+        reference = os.path.abspath(reference),
+        genome = genome_build,
+        dbsnp = os.path.abspath(dbsnp),
+        refpanel = os.path.abspath(refpanel),
+        dir = os.path.abspath("../output/makepanel/"),
+        sc = get_sc,
+        regions = os.path.abspath(regions),
+        meta = os.path.abspath("../input/{sample}_panel_meta.csv"),
+        medium_job_cores = medium_job_cores,
+        large_job_cores = large_job_cores,
+    log:
+        os.path.abspath("../logs/scan2_config/{sample}.log")
+    shell: 
+        "cd {params.dir} && "
+        "scan2 -d {wildcards.sample} init && "
+        "cd {wildcards.sample} && "
+        "scan2 config --verbose "
+        "--ref {params.reference} "
+        "--genome {params.genome} "
+        "--regions-file {params.regions} "
+        "--phaser shapeit "
+        "--shapeit-refpanel {params.refpanel} "
+        "--dbsnp {params.dbsnp} "
+        "--genotype-n-cores {params.medium_job_cores} "
+        "--integrate-table-n-cores {params.medium_job_cores} "
+        "--digest-depth-n-cores {params.medium_job_cores} "
+        "--permtool-callable-bed-n-cores {params.medium_job_cores} "
+        "--permtool-make-permutations-n-cores {params.medium_job_cores} "
+        "--permtool-combine-permutations-n-cores {params.medium_job_cores} "
+        "--abmodel-n-cores {params.large_job_cores} "
+        "--cross-sample-panel {input.cross_sample_panel} "
+        "--bulk-bam {input.bulk} "
+        "{params.sc} 2> {log} && " 
+        "scan2 validate "
+
+rule SCAN2: 
+    """
+    run scan2, warning this is resource intensive
+    """
+    input: 
+        os.path.abspath("../output/{sample}/scan.yaml"),
+    output: 
+        "../output/{sample}/complete.txt",
+    singularity:
+        singularity_path,
+    params:
+        dir = os.path.abspath("../output/{sample}/"),
+    resources:
+        walltime=1000,
+    threads: large_job_cores
+    log: 
+        os.path.abspath("../logs/scan2/{sample}.log")
+    shell: 
+        "cd {params.dir} && "
+        "scan2 run --joblimit {threads} 2>{log} && "
+        "touch {output}" 
+
+rule rescue_config:
+    """
+    create the config file for rescue
+    """
+    input:
+        "../output/{sample}/complete.txt",
+    output:
+        os.path.abspath("../output/rescue/{sample}/scan.yaml"),
+    singularity:
+        singularity_path,
+    params: 
+        dir = os.path.abspath("../output/rescue"),
+        sc = get_sc_rda,
+        fdr = fdr,
+    log:
+        os.path.abspath("../logs/rescue_config/{sample}.log")
+    shell: 
+        "cd {params.dir} && "
+        "scan2 -d {wildcards.sample} init && "
+        "cd {wildcards.sample} && "
+        "scan2 config --verbose "
+        "--analysis rescue "
+        "--rescue-target-fdr {params.fdr} "
+        "{params.sc} 2> {log} && "
+        "scan2 validate "
+
+rule rescue:
+    """
+    run rescue
+    """
+    input: 
+        os.path.abspath("../output/rescue/{sample}/scan.yaml"),
+    output: 
+        directory(os.path.abspath("../output/rescue/{sample}/objects/"))
+    singularity:
+        singularity_path,
+    params:
+        dir = os.path.abspath("../output/rescue/{sample}/"),
+    resources:
+        walltime=1000,
+    threads: large_job_cores
+    log: 
+        os.path.abspath("../logs/rescue/{sample}.log")
+    shell: 
+        "cd {params.dir} && "
+        "scan2 rescue --joblimit {threads} 2>{log}"
+
+rule scan2_to_tsv:
+    """
+    This step converts the rda output from scan2 to a tsv file for easy 
+    downstream analysis
+    """
+    input:
+        directory(os.path.abspath("../output/rescue/{sample}/objects/"))
+    output:
+        directory(os.path.abspath("../output/final/{sample}/"))
+    singularity:
+        singularity_path,
+    shell:
+        "for i in $(ls {input}); do Rscript scripts/scan2_to_tsv.R "
+        "-i {input}/$i -o {output}/$(echo $i | cut -f 1 -d '.').tsv; done"

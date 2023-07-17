@@ -1,0 +1,20 @@
+genome_build: hs37d5
+
+hs37d5:
+  reference: ../resources/human_g1k_v37_decoy.fasta
+  dbsnp: ../resources/common_all_20180423.vcf
+  refpanel: ../resources/1000GP_Phase3
+  regions: ../resources/hs37d5_region_split_noX.bed
+
+hg38:
+  reference: ../resources/Homo_sapiens_assembly38.fasta
+  dbsnp: ../resources/common_all_20180418.chrprefix.vcf
+  refpanel: ../resources/eagle_1000g_panel
+  genmap: ../resources/genetic_map_hg38_withX.txt.gz
+  regions: ../resources/hg38_region_split_noX.bed
+
+medium_job_cores: 8
+large_job_cores: 64
+method: PTA
+fdr: 0.01
+singularity: /projects/ps-gleesonlab8/Pipelines/singularity/SCAN2/SCAN2.sif
