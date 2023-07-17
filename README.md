@@ -22,6 +22,7 @@ The input should be a tsv file with the following 4 columns. The header line wil
 ### Example Input
 
 |Single_cell_name|Single_cell_path|Bulk_name|Bulk_path|
+|---|---|---|---|
 |0001-SC01|/path/to/sc/bam/0001-sc01.bam|A-0001-B|/path/to/bulk/bam/A-0001-B.bam|
 |0001-SC02|/path/to/sc/bam/0001-sc02.bam|A-0001-B|/path/to/bulk/bam/A-0001-B.bam|
 
